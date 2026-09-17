@@ -38,6 +38,7 @@ The bar and the percentage are quota **remaining**, not used. The countdown come
 ## Install
 
 ```sh
+git clone https://github.com/pedropaulovc/llm-quota && cd llm-quota
 bun install       # nothing to fetch; the CLI has zero runtime dependencies
 bun link          # exposes `llm-quota` on PATH
 ```
@@ -89,3 +90,7 @@ Use `--no-refresh` to guarantee the tool only reads.
 An Anthropic OAuth grant family dies ~30 days after the interactive login regardless of rotation; those accounts surface as `refresh failed: invalid_grant` and need a re-login.
 
 Tokens are never printed, logged, or included in `--json` output, and are stripped from provider error bodies.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

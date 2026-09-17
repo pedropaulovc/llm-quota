@@ -1,6 +1,8 @@
 {
   "name": "llm-quota",
-  "module": "index.ts",
+  "description": "Prints remaining Claude and Codex subscription quota for every locally stored account, probed concurrently",
+  "license": "MIT",
+  "repository": "github:pedropaulovc/llm-quota",
   "type": "module",
   "private": true,
   "bin": {
