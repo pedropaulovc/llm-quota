@@ -1,9 +1,10 @@
 /**
  * Terminal and JSON rendering for discovered account quotas.
  *
- * The table is grouped by provider, one row per account, and stays readable at
- * 100 columns: the window cells are wrapped onto continuation lines aligned
- * under the window column rather than truncated.
+ * The terminal view is built for a human scanning several accounts at once:
+ * one block per account, one aligned line per metered window, and a bar whose
+ * fill is the quota still available. Columns are sized from the whole data set
+ * so every window line in the output shares a left edge.
  */
 
 import type { AccountQuota, Credits, Provider, QuotaWindow } from "./types.ts";
@@ -17,80 +18,165 @@ const YELLOW = "\x1b[33m";
 const CYAN = "\x1b[36m";
 const BOLD_RED = "\x1b[1;31m";
 
-const LABEL_MAX = 28;
-const CAUSE_MAX = 60;
-const GAP = "  ";
 const PROVIDER_ORDER: Provider[] = ["claude", "codex"];
+const PROVIDER_TITLE: Record<Provider, string> = { claude: "CLAUDE", codex: "CODEX" };
 
-/** A rendered fragment plus the ANSI prefix it wants when color is enabled. */
-interface Cell {
-	text: string;
-	color?: string;
-}
+const FULL = "█";
+const HALF = "▌";
+const EMPTY = "─";
+const BAR_WIDE = 24;
+const BAR_NARROW = 12;
+/** Below this the bar is shrunk rather than letting lines wrap. */
+const NARROW_COLUMNS = 92;
 
-/** Columns shared by every row, plus the trailing wrappable cells. */
-interface Row {
-	label: Cell;
-	plan: string;
-	source: string;
-	tail: Cell[];
-	notes: string[];
+/** Layout widths measured across every rendered window line. */
+interface Widths {
+	window: number;
+	percent: number;
+	bar: number;
 }
 
 export function formatDuration(ms: number): string {
 	if (!Number.isFinite(ms) || ms <= 0) return "—";
-	const totalSeconds = Math.round(ms / 1000);
-	if (totalSeconds < 60) return `${totalSeconds}s`;
-	const totalMinutes = Math.floor(totalSeconds / 60);
-	if (totalMinutes < 60) return `${totalMinutes}m`;
-	const totalHours = Math.floor(totalMinutes / 60);
-	if (totalHours < 24) return `${totalHours}h${totalMinutes % 60}m`;
-	return `${Math.floor(totalHours / 24)}d${totalHours % 24}h`;
+	const totalMinutes = Math.round(ms / 60_000);
+	const days = Math.floor(totalMinutes / 1440);
+	const hours = Math.floor((totalMinutes % 1440) / 60);
+	const minutes = totalMinutes % 60;
+	if (days > 0) return `${days}d${String(hours).padStart(2, "0")}h`;
+	if (hours > 0) return `${hours}h${String(minutes).padStart(2, "0")}m`;
+	if (totalMinutes > 0) return `${totalMinutes}m`;
+	return `${Math.max(1, Math.round(ms / 1000))}s`;
 }
 
 export function renderTable(quotas: AccountQuota[], opts: { color: boolean; now?: number }): string {
-	if (quotas.length === 0) return "";
 	const now = opts.now ?? Date.now();
-	const width = terminalWidth();
-	const groups = PROVIDER_ORDER.map((provider) => ({
-		provider,
-		rows: quotas
-			.filter((quota) => quota.account.provider === provider)
-			.sort((a, b) => a.account.label.localeCompare(b.account.label))
-			.map((quota) => buildRow(quota, now)),
-	})).filter((group) => group.rows.length > 0);
+	const terminal = process.stdout.columns;
+	const columns = typeof terminal === "number" && terminal > 0 ? terminal : 100;
+	const widths = measure(quotas, columns < NARROW_COLUMNS ? BAR_NARROW : BAR_WIDE, columns);
+	const out: string[] = [];
 
-	const all = groups.flatMap((group) => group.rows);
-	const labelWidth = Math.max(...all.map((row) => row.label.text.length));
-	const planWidth = Math.max(...all.map((row) => row.plan.length));
-	const sourceWidth = Math.max(...all.map((row) => row.source.length));
-	const prefixWidth = labelWidth + GAP.length + planWidth + GAP.length + sourceWidth + GAP.length;
-	const tailWidth = Math.max(24, width - prefixWidth - 2);
-
-	const lines: string[] = [];
-	for (const group of groups) {
-		if (lines.length > 0) lines.push("");
-		lines.push(paint(group.provider.toUpperCase(), BOLD, opts.color));
-		for (const row of group.rows) {
-			const prefix =
-				pad(paint(row.label.text, row.label.color, opts.color), row.label.text.length, labelWidth) +
-				GAP +
-				pad(paint(row.plan, DIM, opts.color), row.plan.length, planWidth) +
-				GAP +
-				pad(paint(row.source, DIM, opts.color), row.source.length, sourceWidth) +
-				GAP;
-			const indent = " ".repeat(prefixWidth);
-			const wrapped = wrap(row.tail, tailWidth);
-			for (const [index, cells] of wrapped.entries()) {
-				const rendered = cells.map((cell) => paint(cell.text, cell.color, opts.color)).join(GAP);
-				lines.push(`  ${index === 0 ? prefix : indent}${rendered}`);
-			}
-			for (const note of row.notes) {
-				lines.push(`    ${paint(truncate(note, Math.max(40, width - 6)), DIM, opts.color)}`);
-			}
+	for (const provider of PROVIDER_ORDER) {
+		const group = quotas.filter((quota) => quota.account.provider === provider);
+		if (group.length === 0) continue;
+		if (out.length > 0) out.push("");
+		out.push(paint(PROVIDER_TITLE[provider], BOLD, opts.color));
+		for (const [index, quota] of group.entries()) {
+			out.push(...accountBlock(quota, widths, columns, now, opts.color).slice(index === 0 ? 1 : 0));
 		}
 	}
-	return lines.join("\n");
+
+	if (out.length === 0) return paint("no accounts", DIM, opts.color);
+	return out.join("\n");
+}
+
+function accountBlock(quota: AccountQuota, widths: Widths, columns: number, now: number, color: boolean): string[] {
+	const lines = ["", `  ${heading(quota, color)}`];
+	const failure = errorOf(quota);
+	if (failure !== undefined) {
+		for (const line of wrap(failure, columns - 4)) lines.push(`    ${paint(line, RED, color)}`);
+		return lines;
+	}
+	for (const window of orderWindows(quota.windows)) lines.push(windowLine(window, widths, now, color));
+	if (quota.credits !== undefined) lines.push(creditsLine(quota.credits, widths, color));
+	for (const note of quota.notes) {
+		for (const line of wrap(`· ${note}`, columns - 4)) lines.push(`    ${paint(line, DIM, color)}`);
+	}
+	return lines;
+}
+
+/** Break on word boundaries so a long provider error stays inside the terminal. */
+function wrap(text: string, width: number): string[] {
+	if (width < 20 || text.length <= width) return [text];
+	const lines: string[] = [];
+	let line = "";
+	for (const word of text.split(" ")) {
+		if (line.length === 0) {
+			line = word;
+			continue;
+		}
+		if (line.length + 1 + word.length <= width) {
+			line = `${line} ${word}`;
+			continue;
+		}
+		lines.push(line);
+		line = word;
+	}
+	if (line.length > 0) lines.push(line);
+	return lines;
+}
+
+/** `email · plan · store, store` — identity first, provenance dimmed after it. */
+function heading(quota: AccountQuota, color: boolean): string {
+	const account = quota.account;
+	const source = account.sourceTag + (quota.refreshed === true ? " ↻" : "");
+	const meta = [account.plan, source].filter((part): part is string => part !== undefined && part.length > 0);
+	const name = paint(account.label, quota.windows.some((entry) => entry.exhausted === true) ? BOLD_RED : BOLD, color);
+	if (meta.length === 0) return name;
+	return `${name} ${paint(`· ${meta.join(" · ")}`, DIM, color)}`;
+}
+
+function windowLine(window: QuotaWindow, widths: Widths, now: number, color: boolean): string {
+	const remaining = remainingOf(window);
+	const tint = colorFor(remaining, window.exhausted === true);
+	const label = clip(window.label, widths.window).padEnd(widths.window);
+	const percent = `${remaining}%`.padStart(widths.percent);
+	const reset = window.resetsAt === undefined ? "" : `resets in ${formatDuration(window.resetsAt - now)}`;
+	const flag = window.exhausted === true ? paint("EXHAUSTED", RED, color) : "";
+	const tail = [flag, paint(reset, DIM, color)].filter((part) => part.length > 0).join(paint(" · ", DIM, color));
+	return `    ${paint(label, DIM, color)}  ${paint(bar(remaining, widths.bar), tint, color)} ${paint(percent, tint, color)}  ${tail}`.trimEnd();
+}
+
+/**
+ * Overage credits are not a window — they have no allowance to fill — so the
+ * bar column stays blank and the balance sits under the percentages.
+ */
+function creditsLine(credits: Credits, widths: Widths, color: boolean): string {
+	const label = "credits".padEnd(widths.window);
+	const cap = credits.limitReached === true ? paint(" cap reached", RED, color) : "";
+	return `    ${paint(label, DIM, color)}  ${" ".repeat(widths.bar)} ${paint(amountOf(credits), CYAN, color)}${cap}`.trimEnd();
+}
+
+function amountOf(credits: Credits): string {
+	if (credits.currency === "credits") {
+		const usd = credits.usd === undefined ? "" : ` (≈$${credits.usd.toFixed(2)})`;
+		return `${credits.balance.toFixed(2)}${usd}`;
+	}
+	if (credits.currency === "USD") return `$${credits.balance.toFixed(2)}`;
+	return `${credits.balance.toFixed(2)} ${credits.currency}`;
+}
+
+/** Fill is quota REMAINING, with a half block for the trailing fraction. */
+function bar(remaining: number, width: number): string {
+	const halves = Math.round((remaining / 100) * width * 2);
+	const full = Math.floor(halves / 2);
+	const half = halves % 2 === 1 ? HALF : "";
+	const filled = FULL.repeat(Math.min(width, full)) + half;
+	return filled + EMPTY.repeat(Math.max(0, width - full - half.length));
+}
+
+/**
+ * Column widths that keep the longest possible line inside the terminal: the
+ * label column absorbs whatever the bar, percentage and reset tail leave over.
+ */
+function measure(quotas: AccountQuota[], bar: number, columns: number): Widths {
+	let window = "credits".length;
+	let percent = 2;
+	for (const quota of quotas) {
+		if (errorOf(quota) !== undefined) continue;
+		for (const entry of quota.windows) {
+			window = Math.max(window, entry.label.length);
+			percent = Math.max(percent, `${remainingOf(entry)}%`.length);
+		}
+	}
+	// 4 indent + label + 2 + bar + 1 + percent + 2 + "EXHAUSTED · resets in 2d14h".
+	const budget = columns - (9 + bar + percent + "EXHAUSTED · resets in 00d00h".length);
+	return { window: Math.max(8, Math.min(window, budget)), percent, bar };
+}
+
+/** Shorten an over-long meter name; the id in `--json` stays complete. */
+function clip(text: string, width: number): string {
+	if (text.length <= width) return text;
+	return `${text.slice(0, Math.max(1, width - 1))}…`;
 }
 
 export function renderJson(quotas: AccountQuota[]): string {
@@ -130,58 +216,6 @@ export function renderJson(quotas: AccountQuota[]): string {
 	);
 }
 
-function buildRow(quota: AccountQuota, now: number): Row {
-	const label = truncate(quota.account.label, LABEL_MAX);
-	const plan = quota.account.plan ?? "—";
-	const source = quota.account.sourceTag + (quota.refreshed === true ? " ↻" : "");
-	const failure = errorOf(quota);
-	if (failure !== undefined) {
-		return {
-			label: { text: label, color: RED },
-			plan,
-			source,
-			tail: [{ text: failure, color: RED }],
-			notes: quota.notes,
-		};
-	}
-	const windows = orderWindows(quota.windows);
-	const exhausted = windows.some((window) => window.exhausted === true);
-	const tail = windows.map((window) => windowCell(window, now));
-	if (quota.credits) tail.push(creditsCell(quota.credits));
-	if (tail.length === 0) tail.push({ text: "no windows reported", color: DIM });
-	return {
-		label: { text: label, color: exhausted ? BOLD_RED : undefined },
-		plan,
-		source,
-		tail,
-		notes: quota.notes,
-	};
-}
-
-function windowCell(window: QuotaWindow, now: number): Cell {
-	const remaining = remainingOf(window);
-	const reset = window.resetsAt === undefined ? "—" : formatDuration(window.resetsAt - now);
-	const flag = window.exhausted === true ? " EXHAUSTED" : "";
-	return {
-		text: `${window.label} ${remaining}%${flag} (${reset})`,
-		color: colorFor(remaining, window.exhausted === true),
-	};
-}
-
-function creditsCell(credits: Credits): Cell {
-	const cap = credits.limitReached === true ? " (cap reached)" : "";
-	const amount =
-		credits.currency === "credits"
-			? `${credits.balance.toFixed(2)}${credits.usd === undefined ? "" : ` (≈$${credits.usd.toFixed(2)})`}`
-			: credits.currency === "USD"
-				? `$${credits.balance.toFixed(2)}`
-				: `${credits.balance.toFixed(2)} ${credits.currency}`;
-	return {
-		text: `credits ${amount}${cap}`,
-		color: credits.limitReached === true ? RED : CYAN,
-	};
-}
-
 /** Primary (request-gating) windows first, model-scoped meters after. */
 function orderWindows(windows: QuotaWindow[]): QuotaWindow[] {
 	const primary = windows.filter((window) => window.primary === true);
@@ -193,74 +227,21 @@ function remainingOf(window: QuotaWindow): number {
 }
 
 function colorFor(remaining: number, exhausted: boolean): string {
-	if (exhausted) return RED;
-	if (remaining >= 50) return GREEN;
-	if (remaining >= 20) return YELLOW;
-	return RED;
+	if (exhausted || remaining < 20) return RED;
+	if (remaining < 50) return YELLOW;
+	return GREEN;
 }
 
 /** A store-disabled credential outranks any probe error text. */
 function errorOf(quota: AccountQuota): string | undefined {
 	const cause = quota.account.disabledCause;
-	if (cause !== undefined) return `disabled: ${truncate(cause, CAUSE_MAX)}`;
-	return quota.error;
-}
-
-/**
- * Lay the trailing cells out over as few lines of `width` as possible; a single
- * cell wider than `width` (a long error message) is split on word boundaries.
- */
-function wrap(cells: Cell[], width: number): Cell[][] {
-	const lines: Cell[][] = [];
-	let current: Cell[] = [];
-	let used = 0;
-	for (const cell of cells) {
-		for (const text of split(cell.text, width)) {
-			if (current.length > 0 && used + GAP.length + text.length > width) {
-				lines.push(current);
-				current = [];
-				used = 0;
-			}
-			if (current.length > 0) used += GAP.length;
-			current.push({ text, color: cell.color });
-			used += text.length;
-		}
-	}
-	if (current.length > 0) lines.push(current);
-	return lines;
-}
-
-function split(text: string, width: number): string[] {
-	if (text.length <= width) return [text];
-	const chunks: string[] = [];
-	let chunk = "";
-	for (const word of text.split(" ")) {
-		if (chunk.length > 0 && chunk.length + 1 + word.length > width) {
-			chunks.push(chunk);
-			chunk = "";
-		}
-		chunk = chunk.length === 0 ? word : `${chunk} ${word}`;
-	}
-	if (chunk.length > 0) chunks.push(chunk);
-	return chunks;
-}
-
-function pad(rendered: string, visible: number, width: number): string {
-	return rendered + " ".repeat(Math.max(0, width - visible));
+	if (cause !== undefined) return `disabled: ${cause.replace(/\s+/g, " ").trim()}`;
+	if (quota.error !== undefined) return quota.error.replace(/\s+/g, " ").trim();
+	return undefined;
 }
 
 function paint(text: string, color: string | undefined, enabled: boolean): string {
-	if (!enabled || color === undefined) return text;
+	if (!enabled || color === undefined || text.length === 0) return text;
 	return `${color}${text}${RESET}`;
 }
 
-function truncate(text: string, max: number): string {
-	if (text.length <= max) return text;
-	return `${text.slice(0, Math.max(1, max - 1))}…`;
-}
-
-function terminalWidth(): number {
-	const columns = process.stdout.columns;
-	if (columns === undefined || columns <= 0) return 100;
-	return Math.max(60, columns);
-}
