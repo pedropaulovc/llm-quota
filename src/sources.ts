@@ -74,15 +74,17 @@ function num(value: unknown): number | undefined {
 }
 
 /**
- * Stable grouping key. Two accounts are provably the same only when they share
- * a provider and an account id, or a provider and an email — and, when both
- * stores know it, the same organization: one email can hold a Team seat and a
- * personal Max plan, two separate grants with separate quotas. An orgId that
- * merely repeats the account id (omp records the ChatGPT account id in both
- * fields, Codex having no organization) carries no identity and is ignored, so
- * a store that reports no organization still matches its twin. A candidate
- * with no id at all is keyed by its source so it can never absorb — or be
- * absorbed by — a different account.
+ * Post-probe merge key for the CLI, applied once a probe has resolved an
+ * account's identity and every row carries an account id or an email. Two
+ * accounts are the same only when they share a provider and an account id, or a
+ * provider and an email — and, when both stores know it, the same organization:
+ * one email can hold a Team seat and a personal Max plan, two separate grants
+ * with separate quotas. An orgId that merely repeats the account id (omp records
+ * the ChatGPT account id in both fields, Codex having no organization) carries
+ * no identity and is ignored, so a store that reports no organization still
+ * matches its twin. A candidate with no id at all is keyed by its source so it
+ * can never absorb — or be absorbed by — a different account. Pre-probe
+ * grouping needs more than one key per account and lives in `dedupeAccounts`.
  */
 export function identityKey(account: Account): string {
 	const accountId = account.accountId;
@@ -261,15 +263,19 @@ export function discoverAccounts(opts?: { home?: string }): Account[] {
 }
 
 /**
- * Pick the survivor of one provably-identical group: the credential with the
- * most token life left, an omp row winning ties because it carries both tokens
- * and full metadata. Display-only fields missing from the survivor are filled
- * from its twins — those describe the same account, so they cannot mislabel it.
- * Tokens are never taken from a discarded twin.
+ * Pick the survivor of one provably-identical group. A credential the store
+ * already marked dead (omp's `disabled_cause`) loses to any live twin, so a
+ * fresh login is never reported as a disabled account; among candidates that are
+ * all live — or all dead — the one with the most token life left wins, an omp
+ * row taking ties because it carries both tokens and full metadata.
+ * Display-only fields missing from the survivor are filled from its twins —
+ * those describe the same account, so they cannot mislabel it. Tokens are never
+ * taken from a discarded twin.
  */
 function collapseGroup(group: Account[]): Account {
+	const live = group.filter((candidate) => candidate.disabledCause === undefined);
 	let winner: Account | undefined;
-	for (const candidate of group) {
+	for (const candidate of live.length === 0 ? group : live) {
 		if (winner === undefined) {
 			winner = candidate;
 			continue;
@@ -285,29 +291,114 @@ function collapseGroup(group: Account[]): Account {
 	}
 	if (winner === undefined) throw new Error("cannot collapse an empty identity group");
 	const merged: Account = { ...winner };
+	const tags = [winner.sourceTag];
 	for (const twin of group) {
 		merged.email ??= twin.email;
 		merged.plan ??= twin.plan;
 		merged.orgId ??= twin.orgId;
 		merged.orgName ??= twin.orgName;
+		// Every store this subscription was found in stays visible: a dead omp row
+		// beside a fresh login is exactly what a user needs to see to know which
+		// store to re-authorize.
+		if (!tags.includes(twin.sourceTag)) tags.push(twin.sourceTag);
 	}
+	merged.sourceTag = tags.join(", ");
 	merged.label = merged.email ?? merged.label;
 	return merged;
 }
 
-/** Collapse candidates that are provably the same account. */
+/**
+ * The identifiers one candidate knows, normalized for comparison. An orgId that
+ * merely repeats the account id (omp records the ChatGPT account id in both
+ * fields, Codex having no organization) is not organization identity and is
+ * dropped, so a store that reports no organization still matches its twin.
+ */
+interface Identifiers {
+	accountId: string | undefined;
+	email: string | undefined;
+	orgId: string | undefined;
+}
+
+interface Candidate {
+	account: Account;
+	ids: Identifiers;
+	/** Identity-derived sort key: fixes the processing order of a candidate set. */
+	order: string;
+}
+
+function candidateOf(account: Account): Candidate {
+	const accountId = account.accountId;
+	const orgId = account.orgId;
+	const ids: Identifiers = {
+		accountId,
+		email: account.email?.toLowerCase(),
+		orgId: orgId === accountId ? undefined : orgId,
+	};
+	const order = [
+		account.provider,
+		ids.accountId ?? "",
+		ids.email ?? "",
+		ids.orgId ?? "",
+		account.sourceTag,
+		account.label,
+	].join("\u0000");
+	return { account, ids, order };
+}
+
+function shares(left: Identifiers, right: Identifiers): boolean {
+	if (left.accountId !== undefined && left.accountId === right.accountId) return true;
+	if (left.email !== undefined && left.email === right.email) return true;
+	return left.orgId !== undefined && left.orgId === right.orgId;
+}
+
+/** Any identifier both candidates know, disagreeing: two different accounts. */
+function conflicts(left: Identifiers, right: Identifiers): boolean {
+	if (left.accountId !== undefined && right.accountId !== undefined && left.accountId !== right.accountId) return true;
+	if (left.email !== undefined && right.email !== undefined && left.email !== right.email) return true;
+	return left.orgId !== undefined && right.orgId !== undefined && left.orgId !== right.orgId;
+}
+
+/**
+ * Collapse candidates that are provably the same account, by union over shared
+ * identifiers: two candidates of one provider join a group when they share any
+ * identifier both know (account id, email, organization) and no identifier both
+ * know disagrees. Partial records therefore group before any probe runs — an omp
+ * row holding an account id, an email and an org beside a `~/.claude`
+ * credential that knows only the same email is one subscription, where a
+ * single-key lookup saw two — while a differing account id, email or
+ * organization keeps two grants apart even when another identifier matches. A
+ * candidate with no identifier at all stands alone. Candidates are processed in
+ * an order derived from their identity rather than from discovery, so the same
+ * set always groups the same way whatever order it arrives in.
+ */
 export function dedupeAccounts(accounts: Account[]): Account[] {
-	const groups = new Map<string, Account[]>();
-	for (const account of accounts) {
-		const key = identityKey(account);
-		const group = groups.get(key);
-		if (group === undefined) {
-			groups.set(key, [account]);
-			continue;
+	const candidates = accounts.map(candidateOf).sort((a, b) => {
+		if (a.order === b.order) return 0;
+		return a.order < b.order ? -1 : 1;
+	});
+	const groupOf = new Map<Candidate, Candidate[]>(candidates.map((candidate) => [candidate, [candidate]]));
+	for (const [index, left] of candidates.entries()) {
+		for (const right of candidates.slice(index + 1)) {
+			if (left.account.provider !== right.account.provider) continue;
+			if (!shares(left.ids, right.ids)) continue;
+			const group = groupOf.get(left);
+			const other = groupOf.get(right);
+			if (group === undefined || other === undefined || group === other) continue;
+			// Joining must not put two candidates that disagree in one group.
+			if (group.some((held) => other.some((twin) => conflicts(held.ids, twin.ids)))) continue;
+			const joined = [...group, ...other];
+			for (const member of joined) groupOf.set(member, joined);
 		}
-		group.push(account);
 	}
-	return sortAccounts([...groups.values()].map(collapseGroup));
+	const collapsed: Account[] = [];
+	const emitted = new Set<Candidate[]>();
+	for (const candidate of candidates) {
+		const group = groupOf.get(candidate);
+		if (group === undefined || emitted.has(group)) continue;
+		emitted.add(group);
+		collapsed.push(collapseGroup(group.map((member) => member.account)));
+	}
+	return sortAccounts(collapsed);
 }
 
 function withTokens(account: Account, tokens: RefreshedTokens): Account {
@@ -384,13 +475,15 @@ function persistOmp(account: Account, dbPath: string, rowId: number, tokens: Ref
 }
 
 /**
- * Return `account` when its access token is still usable, otherwise refresh it,
- * persist the rotated pair back to the originating store, and return a new
- * `Account`. Never mutates the input.
+ * Refresh unconditionally, persist the rotated pair back to the originating
+ * store, and return a new `Account`; never mutates the input. Callers that only
+ * want a usable token should go through `ensureFreshToken`; this entry point
+ * exists for the caller that has proof the access token is dead (a 401) even
+ * though the store reported no expiry. Throws when the credential cannot be
+ * refreshed at all: the store already marked it disabled, or it holds no
+ * refresh token.
  */
-export async function ensureFreshToken(account: Account, opts: ProbeOptions): Promise<Account> {
-	if (account.expiresAt === undefined) return account;
-	if (account.expiresAt - Date.now() > REFRESH_SKEW_MS) return account;
+export async function refreshAccount(account: Account, opts: ProbeOptions): Promise<Account> {
 	if (account.disabledCause !== undefined) {
 		throw new Error(`token expired and ${account.sourceTag} is disabled (${account.disabledCause}); re-login required`);
 	}
@@ -412,4 +505,15 @@ export async function ensureFreshToken(account: Account, opts: ProbeOptions): Pr
 	}
 	persistClaudeFile(source.filePath, tokens);
 	return withTokens(account, tokens);
+}
+
+/**
+ * Return `account` when its access token is still usable — the store reported no
+ * expiry, or more than `REFRESH_SKEW_MS` of life remains — otherwise refresh it
+ * through `refreshAccount`. Never mutates the input.
+ */
+export async function ensureFreshToken(account: Account, opts: ProbeOptions): Promise<Account> {
+	if (account.expiresAt === undefined) return account;
+	if (account.expiresAt - Date.now() > REFRESH_SKEW_MS) return account;
+	return refreshAccount(account, opts);
 }

@@ -274,7 +274,7 @@ export async function probeCodex(account: Account, opts: ProbeOptions): Promise<
 		});
 		if (!response.ok) {
 			const error = await httpError(response, account.accessToken);
-			return { account: { ...account, accountId }, windows: [], notes: [], error };
+			return { account: { ...account, accountId }, windows: [], notes: [], error, status: response.status };
 		}
 
 		const payload: unknown = await response.json();

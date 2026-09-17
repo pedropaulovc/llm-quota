@@ -364,7 +364,8 @@ export async function probeClaude(account: Account, opts: ProbeOptions): Promise
 			label: account.email === undefined ? who.email ?? account.label : account.label,
 		};
 		if (!response.ok) {
-			return { account: resolved, windows: [], notes: [], error: await httpError(response, account.accessToken) };
+			const error = await httpError(response, account.accessToken);
+			return { account: resolved, windows: [], notes: [], error, status: response.status };
 		}
 
 		const { windows, credits, notes } = normalizeClaudeUsage(await response.json());

@@ -44,11 +44,18 @@ interface TokenResponse {
 async function refreshFailure(provider: string, response: Response, sentRefreshToken: string): Promise<Error> {
 	const encoded = encodeURIComponent(sentRefreshToken);
 	// An error body can echo the credential in any serialization the request
-	// used: raw, percent-encoded (the codex refresh POSTs a form body),
-	// form-encoded (`+` for space), or JSON-escaped. Longest first, so a
+	// used: raw, percent-encoded, the exact `URLSearchParams` form the codex
+	// refresh POSTs (it escapes `~!'()`, which `encodeURIComponent` leaves
+	// bare), form-encoded (`+` for space), or JSON-escaped. Longest first, so a
 	// shorter encoding never truncates a longer one into a surviving tail.
 	const variants = [
-		...new Set([sentRefreshToken, encoded, encoded.replaceAll("%20", "+"), JSON.stringify(sentRefreshToken).slice(1, -1)]),
+		...new Set([
+			sentRefreshToken,
+			encoded,
+			encoded.replaceAll("%20", "+"),
+			new URLSearchParams({ t: sentRefreshToken }).toString().slice(2),
+			JSON.stringify(sentRefreshToken).slice(1, -1),
+		]),
 	]
 		.filter((variant) => variant.length > 0)
 		.sort((a, b) => b.length - a.length);
@@ -68,6 +75,12 @@ function readTokens(provider: string, payload: TokenResponse, sentRefreshToken: 
 	// either would persist as a NaN/null expiry and refresh on every later run.
 	if (typeof expiresIn !== "number" || !Number.isFinite(expiresIn)) {
 		throw new Error(`${provider} token refresh returned no usable expires_in`);
+	}
+	// The window below tolerates an expiry up to a day in the past for clock
+	// skew, so `0` or `-3600` would sail through it: the CLI would persist an
+	// already-dead token and probe with it anyway.
+	if (expiresIn <= 0) {
+		throw new Error(`${provider} token refresh returned an implausible expires_in`);
 	}
 	const rotated = payload.refresh_token;
 	const now = Date.now();

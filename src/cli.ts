@@ -8,7 +8,7 @@ import type { Account, AccountQuota, Provider } from "./types.ts";
 import { probeClaude } from "./claude.ts";
 import { probeCodex } from "./codex.ts";
 import { renderJson, renderTable } from "./render.ts";
-import { dedupeAccounts, discoverAccounts, ensureFreshToken, identityKey } from "./sources.ts";
+import { dedupeAccounts, discoverAccounts, ensureFreshToken, identityKey, refreshAccount } from "./sources.ts";
 
 const STORES = [
 	"~/.omp/agent/agent.db          (table auth_credentials)",
@@ -39,6 +39,12 @@ interface Options {
 	timeoutMs: number;
 }
 
+/**
+ * Flags that carry no value. Without this list `--json=false` would parse as a
+ * bare `--json` and silently enable the opposite of what was asked for.
+ */
+const NULLARY_FLAGS = ["-h", "--help", "--json", "--no-refresh", "--all-sources"];
+
 function parseArgs(argv: string[]): Options {
 	const opts: Options = { json: false, refresh: true, allSources: false, timeoutMs: 20_000 };
 	for (let index = 0; index < argv.length; index += 1) {
@@ -46,6 +52,9 @@ function parseArgs(argv: string[]): Options {
 		const eq = arg.indexOf("=");
 		const flag = eq === -1 ? arg : arg.slice(0, eq);
 		const inlineValue = eq === -1 ? undefined : arg.slice(eq + 1);
+		if (inlineValue !== undefined && NULLARY_FLAGS.includes(flag)) {
+			die(`${flag} takes no value, got ${describe(inlineValue)}`);
+		}
 		if (flag === "-h" || flag === "--help") {
 			process.stdout.write(`${USAGE}\n`);
 			process.exit(0);
@@ -94,6 +103,15 @@ function describe(value: string | undefined): string {
 	return `"${value}"`;
 }
 
+/**
+ * A stale 401 is worth one re-mint, but only on a credential this run is
+ * allowed to and able to refresh.
+ */
+function retryable(quota: AccountQuota, account: Account, opts: Options): boolean {
+	if (quota.status !== 401 || !opts.refresh) return false;
+	return account.refreshToken !== undefined && account.disabledCause === undefined;
+}
+
 /** Refresh (unless suppressed) and probe one account; never throws. */
 async function resolve(account: Account, opts: Options): Promise<AccountQuota> {
 	if (account.disabledCause !== undefined) {
@@ -109,8 +127,20 @@ async function resolve(account: Account, opts: Options): Promise<AccountQuota> {
 	}
 	const probe = fresh.provider === "claude" ? probeClaude : probeCodex;
 	const quota = await probe(fresh, { timeoutMs: opts.timeoutMs });
-	if (fresh.accessToken !== account.accessToken) return { ...quota, refreshed: true };
-	return quota;
+	const refreshed = fresh.accessToken !== account.accessToken;
+	if (!retryable(quota, fresh, opts)) return refreshed ? { ...quota, refreshed: true } : quota;
+
+	// ~/.codex/auth.json records no expiry and its token need not carry a
+	// readable `exp`, so `ensureFreshToken` passed it through unjudged: this 401
+	// is the first evidence it was stale. Re-mint once and re-probe — a second
+	// 401 is a dead login, and is reported as one rather than retried again.
+	let reminted: Account;
+	try {
+		reminted = await refreshAccount(fresh, { timeoutMs: opts.timeoutMs });
+	} catch (error) {
+		return { ...quota, error: `HTTP 401, and refresh failed: ${reason(error)}` };
+	}
+	return { ...(await probe(reminted, { timeoutMs: opts.timeoutMs })), refreshed: true };
 }
 
 function reason(error: unknown): string {
@@ -136,9 +166,12 @@ function mergeResolved(quotas: AccountQuota[]): AccountQuota[] {
 		}
 		const winner = preferred(seen, quota);
 		const loser = winner === seen ? quota : seen;
+		// Either side may already carry several stores from the pre-probe collapse,
+		// so merge the lists rather than concatenating them into a repeat.
+		const tags = [...winner.account.sourceTag.split(", "), ...loser.account.sourceTag.split(", ")];
 		merged.set(key, {
 			...winner,
-			account: { ...winner.account, sourceTag: `${winner.account.sourceTag}, ${loser.account.sourceTag}` },
+			account: { ...winner.account, sourceTag: [...new Set(tags)].join(", ") },
 		});
 	}
 	return [...merged.values()];

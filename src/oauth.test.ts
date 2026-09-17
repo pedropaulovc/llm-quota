@@ -33,6 +33,30 @@ describe("refresh", () => {
 		}
 	});
 
+	test("redacts the URLSearchParams escaping the codex form body actually sends", async () => {
+		// `URLSearchParams` percent-encodes `~!'()`; `encodeURIComponent` leaves
+		// them bare. Redacting only the latter lets an echo of the exact bytes we
+		// POSTed survive into the `refresh failed: …` row on stdout.
+		const secret = "rt~sub!del'ims(paren)";
+		const echo = new URLSearchParams({ refresh_token: secret }).toString().slice("refresh_token=".length);
+		expect(echo).not.toBe(encodeURIComponent(secret));
+		const error = await refreshCodexToken(secret, opts(`{"error":"invalid_grant","sent":"${echo}"}`, 400)).catch(
+			(reason: Error) => reason,
+		);
+		expect((error as Error).message).not.toInclude(echo);
+		expect((error as Error).message).not.toInclude(secret);
+		expect((error as Error).message).toInclude("<token>");
+	});
+
+	test("rejects a non-positive expires_in instead of persisting a dead token", async () => {
+		// Inside the one-day clock-skew tolerance, so the plausibility window
+		// alone accepts these: the token is stored already expired.
+		const zero = refreshCodexToken(SECRET, opts(`{"access_token":"a","expires_in":0}`, 200));
+		await expect(zero).rejects.toThrow("implausible expires_in");
+		const negative = refreshClaudeToken(SECRET, opts(`{"access_token":"a","expires_in":-3600}`, 200));
+		await expect(negative).rejects.toThrow("implausible expires_in");
+	});
+
 	test("rejects an expires_in that parks the expiry beyond any refresh", async () => {
 		// A seconds/ms mixup or a bogus huge value makes the credential look valid
 		// for millennia: it is never refreshed and every probe 401s forever.

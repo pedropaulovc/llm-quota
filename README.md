@@ -2,31 +2,31 @@
 
 Prints the remaining subscription quota for **every** Claude and Codex account stored locally, probing all of them concurrently.
 
-```
+```text
 $ llm-quota
 CLAUDE
-  pedro@vezza.com.br · max 20x · claude-code, omp#10
+  ada@example.com · max 20x · claude-code, omp#10
     5h                      ███████████████████████▌  98%  resets in 3h 52min
     7d                      ██████████──────────────  42%  resets in 4d 6h
     Fable 7d                ────────────────────────   0%  resets in 4d 6h · EXHAUSTED
 
-  pedro@vza.net · max 20x · omp#11
+  grace@example.org · max 20x · omp#11
     5h                      █████████████████████▌──  90%  resets in 3h 42min
     7d                      ████▌───────────────────  19%  resets in 1d 12h
     Fable 7d                █████───────────────────  21%  resets in 1d 12h
 
-  pedropaulovc@gmail.com · max · omp#6
+  lovelace@example.net · max · omp#6
     disabled: oauth refresh failed: OAuthError: anthropic token refresh failed: 400
     {"error": "invalid_grant", "error_description": "Refresh token not found or invalid"}
 
 CODEX
-  pedro@vezza.com.br · pro · omp#1
+  ada@example.com · pro · omp#1
     weekly                  ────────────────────────   0%  resets in 2d 15h · EXHAUSTED
     GPT-5.3-Codex-Spark 5h  ████████████████████████ 100%  resets in 5h
     GPT-5.3-Codex-Spark 7d  ████████████████████████ 100%  resets in 7d
-    credits                                          442.19 (≈$17.69)
+    credits                                          318.50 (≈$12.74)
 
-  pedropaulovc@gmail.com · pro · omp#9
+  lovelace@example.net · pro · omp#9
     weekly                  ────────────────────────   0%  resets in 2d 13h · EXHAUSTED
     GPT-5.3-Codex-Spark 5h  ████████████████████████ 100%  resets in 5h
     GPT-5.3-Codex-Spark 7d  ████████████████████████ 100%  resets in 7d
@@ -46,7 +46,7 @@ Requires Bun (uses `bun:sqlite` and the built-in fetch).
 
 ## Usage
 
-```
+```text
 llm-quota [--json] [--no-refresh] [--only claude|codex] [--all-sources] [--timeout <sec>]
 
   --json            machine-readable output (never includes tokens)
@@ -73,7 +73,7 @@ A store that is missing is skipped; a store that is malformed reports on stderr 
 
 ## Quota sources
 
-- Claude: `GET https://api.anthropic.com/api/oauth/usage` for the windows, `/api/oauth/profile` for the account identity and plan (only when the store does not already know them, issued concurrently with the usage request).
+- Claude: `GET https://api.anthropic.com/api/oauth/usage` for the windows, plus `/api/oauth/profile` issued concurrently for the account identity, organization and precise plan tier. The profile call is unconditional: it is what proves two stored credentials are the same subscription, and a store's own `subscriptionType` is coarser than the tier the profile reports (`max` vs `max 20x`).
 - Codex: `GET https://chatgpt.com/backend-api/wham/usage`, which reports the plan windows, reserve meters such as Spark, and the credit balance.
 
 `wham/usage` describes the **plan allowance** only: a spent weekly window reports exhausted even while a positive credit balance keeps funding requests as overage, which is why the credit line is shown next to the windows. ChatGPT sells overage at **25 credits per USD**, so balances render as credits with the dollar equivalent alongside.

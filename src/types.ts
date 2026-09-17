@@ -75,6 +75,8 @@ export interface AccountQuota {
 	notes: string[];
 	/** Populated instead of windows when the probe failed. */
 	error?: string;
+	/** HTTP status of a failed probe, so a 401 can be retried after a refresh. */
+	status?: number;
 	/** Token was refreshed during this run. */
 	refreshed?: boolean;
 }
