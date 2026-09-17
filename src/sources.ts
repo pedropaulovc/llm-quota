@@ -268,9 +268,11 @@ export function discoverAccounts(opts?: { home?: string }): Account[] {
  * fresh login is never reported as a disabled account; among candidates that are
  * all live — or all dead — the one with the most token life left wins, an omp
  * row taking ties because it carries both tokens and full metadata.
- * Display-only fields missing from the survivor are filled from its twins —
- * those describe the same account, so they cannot mislabel it. Tokens are never
- * taken from a discarded twin.
+ * Display-only fields and identifiers missing from the survivor are filled from
+ * its twins — every member of a group is provably the same account, so a twin's
+ * account id or organization cannot mislabel the survivor, and filling them
+ * keeps the post-probe merge key strong even when the survivor is the credential
+ * that knew only an email. Tokens are never taken from a discarded twin.
  */
 function collapseGroup(group: Account[]): Account {
 	const live = group.filter((candidate) => candidate.disabledCause === undefined);
@@ -293,6 +295,7 @@ function collapseGroup(group: Account[]): Account {
 	const merged: Account = { ...winner };
 	const tags = [winner.sourceTag];
 	for (const twin of group) {
+		merged.accountId ??= twin.accountId;
 		merged.email ??= twin.email;
 		merged.plan ??= twin.plan;
 		merged.orgId ??= twin.orgId;
@@ -359,6 +362,73 @@ function conflicts(left: Identifiers, right: Identifiers): boolean {
 }
 
 /**
+ * Whether two groups may become one: every cross pair agrees on the identifiers
+ * both sides know, and at least one pair shares one.
+ */
+function compatible(left: Candidate[], right: Candidate[]): boolean {
+	let shared = false;
+	for (const held of left) {
+		for (const twin of right) {
+			if (held.account.provider !== twin.account.provider) return false;
+			if (conflicts(held.ids, twin.ids)) return false;
+			if (shares(held.ids, twin.ids)) shared = true;
+		}
+	}
+	return shared;
+}
+
+/**
+ * One round of grouping: join every pair of groups whose placement is certain.
+ * A group compatible with two groups that disagree with each other has no
+ * provable home — a `~/.claude` credential knowing only an email, against the
+ * two org grants that email holds, could be either — so it joins nothing this
+ * round and neither do its suitors, leaving it to be probed on its own and
+ * merged by identity once the profile answers. Returns `undefined` when nothing
+ * moved, which ends the fixpoint.
+ */
+function mergeRound(groups: Candidate[][]): Candidate[][] | undefined {
+	const partners = new Map<Candidate[], Candidate[][]>(
+		groups.map((members) => [members, groups.filter((other) => other !== members && compatible(members, other))]),
+	);
+	const ambiguous = new Set<Candidate[]>(
+		groups.filter((members) => {
+			const suitors = partners.get(members) ?? [];
+			return suitors.some((one) =>
+				suitors.some(
+					(two) => one !== two && one.some((held) => two.some((twin) => conflicts(held.ids, twin.ids))),
+				),
+			);
+		}),
+	);
+	const holder = new Map<Candidate[], Candidate[]>(groups.map((members) => [members, members]));
+	let joined = false;
+	for (const members of groups) {
+		if (ambiguous.has(members)) continue;
+		for (const partner of partners.get(members) ?? []) {
+			if (ambiguous.has(partner)) continue;
+			const held = holder.get(members);
+			const other = holder.get(partner);
+			if (held === undefined || other === undefined || held === other) continue;
+			// Two groups compatible with a third are not compatible with each other.
+			if (held.some((a) => other.some((b) => conflicts(a.ids, b.ids)))) continue;
+			const union = [...held, ...other];
+			for (const [key, value] of holder) {
+				if (value === held || value === other) holder.set(key, union);
+			}
+			joined = true;
+		}
+	}
+	if (!joined) return undefined;
+	const next: Candidate[][] = [];
+	for (const members of groups) {
+		const group = holder.get(members);
+		if (group === undefined || next.includes(group)) continue;
+		next.push(group);
+	}
+	return next;
+}
+
+/**
  * Collapse candidates that are provably the same account, by union over shared
  * identifiers: two candidates of one provider join a group when they share any
  * identifier both know (account id, email, organization) and no identifier both
@@ -366,39 +436,26 @@ function conflicts(left: Identifiers, right: Identifiers): boolean {
  * row holding an account id, an email and an org beside a `~/.claude`
  * credential that knows only the same email is one subscription, where a
  * single-key lookup saw two — while a differing account id, email or
- * organization keeps two grants apart even when another identifier matches. A
- * candidate with no identifier at all stands alone. Candidates are processed in
- * an order derived from their identity rather than from discovery, so the same
- * set always groups the same way whatever order it arrives in.
+ * organization keeps two grants apart even when another identifier matches.
+ * Groups merge only where the placement is unambiguous: a candidate that fits
+ * two grants which disagree with each other is left alone rather than assigned
+ * by a coin flip that would discard the other grant's token. A candidate with no
+ * identifier at all stands alone. Candidates are processed in an order derived
+ * from their identity rather than from discovery, so the same set always groups
+ * the same way whatever order it arrives in.
  */
 export function dedupeAccounts(accounts: Account[]): Account[] {
 	const candidates = accounts.map(candidateOf).sort((a, b) => {
 		if (a.order === b.order) return 0;
 		return a.order < b.order ? -1 : 1;
 	});
-	const groupOf = new Map<Candidate, Candidate[]>(candidates.map((candidate) => [candidate, [candidate]]));
-	for (const [index, left] of candidates.entries()) {
-		for (const right of candidates.slice(index + 1)) {
-			if (left.account.provider !== right.account.provider) continue;
-			if (!shares(left.ids, right.ids)) continue;
-			const group = groupOf.get(left);
-			const other = groupOf.get(right);
-			if (group === undefined || other === undefined || group === other) continue;
-			// Joining must not put two candidates that disagree in one group.
-			if (group.some((held) => other.some((twin) => conflicts(held.ids, twin.ids)))) continue;
-			const joined = [...group, ...other];
-			for (const member of joined) groupOf.set(member, joined);
-		}
+	let groups: Candidate[][] = candidates.map((candidate) => [candidate]);
+	for (;;) {
+		const next = mergeRound(groups);
+		if (next === undefined) break;
+		groups = next;
 	}
-	const collapsed: Account[] = [];
-	const emitted = new Set<Candidate[]>();
-	for (const candidate of candidates) {
-		const group = groupOf.get(candidate);
-		if (group === undefined || emitted.has(group)) continue;
-		emitted.add(group);
-		collapsed.push(collapseGroup(group.map((member) => member.account)));
-	}
-	return sortAccounts(collapsed);
+	return sortAccounts(groups.map((group) => collapseGroup(group.map((member) => member.account))));
 }
 
 function withTokens(account: Account, tokens: RefreshedTokens): Account {
