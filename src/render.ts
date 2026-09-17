@@ -45,9 +45,9 @@ export function formatDuration(ms: number): string {
 	const days = Math.floor(totalMinutes / 1440);
 	const hours = Math.floor((totalMinutes % 1440) / 60);
 	const minutes = totalMinutes % 60;
-	if (days > 0) return `${days}d${String(hours).padStart(2, "0")}h`;
-	if (hours > 0) return `${hours}h${String(minutes).padStart(2, "0")}m`;
-	if (totalMinutes > 0) return `${totalMinutes}m`;
+	if (days > 0) return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
+	if (hours > 0) return minutes > 0 ? `${hours}h ${minutes}min` : `${hours}h`;
+	if (totalMinutes > 0) return `${totalMinutes}min`;
 	return `${Math.max(1, Math.round(ms / 1000))}s`;
 }
 
@@ -125,7 +125,9 @@ function windowLine(window: QuotaWindow, widths: Widths, now: number, color: boo
 	const percent = `${remaining}%`.padStart(widths.percent);
 	const reset = window.resetsAt === undefined ? "" : `resets in ${formatDuration(window.resetsAt - now)}`;
 	const flag = window.exhausted === true ? paint("EXHAUSTED", RED, color) : "";
-	const tail = [flag, paint(reset, DIM, color)].filter((part) => part.length > 0).join(paint(" · ", DIM, color));
+	// Reset first: it is on every line, so leading with it keeps the countdowns in
+	// one column instead of indenting them past a sibling's EXHAUSTED flag.
+	const tail = [paint(reset, DIM, color), flag].filter((part) => part.length > 0).join(paint(" · ", DIM, color));
 	return `    ${paint(label, DIM, color)}  ${paint(bar(remaining, widths.bar), tint, color)} ${paint(percent, tint, color)}  ${tail}`.trimEnd();
 }
 
@@ -171,8 +173,8 @@ function measure(quotas: AccountQuota[], bar: number, columns: number): Widths {
 			percent = Math.max(percent, `${remainingOf(entry)}%`.length);
 		}
 	}
-	// 4 indent + label + 2 + bar + 1 + percent + 2 + "EXHAUSTED · resets in 2d14h".
-	const budget = columns - (9 + bar + percent + "EXHAUSTED · resets in 00d00h".length);
+	// 4 indent + label + 2 + bar + 1 + percent + 2 + the widest possible tail.
+	const budget = columns - (9 + bar + percent + "resets in 00h 00min · EXHAUSTED".length);
 	return { window: Math.max(8, Math.min(window, budget)), percent, bar };
 }
 

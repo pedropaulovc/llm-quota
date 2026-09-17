@@ -6,14 +6,14 @@ Prints the remaining subscription quota for **every** Claude and Codex account s
 $ llm-quota
 CLAUDE
   pedro@vezza.com.br · max 20x · claude-code, omp#10
-    5h                      ███████████████████████▌  98%  resets in 4h06m
-    7d                      ██████████──────────────  42%  resets in 4d06h
-    Fable 7d                ────────────────────────   0%  EXHAUSTED · resets in 4d06h
+    5h                      ███████████████████████▌  98%  resets in 3h 52min
+    7d                      ██████████──────────────  42%  resets in 4d 6h
+    Fable 7d                ────────────────────────   0%  resets in 4d 6h · EXHAUSTED
 
   pedro@vza.net · max 20x · omp#11
-    5h                      ██████████████████████▌─  93%  resets in 3h56m
-    7d                      █████───────────────────  20%  resets in 1d12h
-    Fable 7d                █████───────────────────  21%  resets in 1d12h
+    5h                      █████████████████████▌──  90%  resets in 3h 42min
+    7d                      ████▌───────────────────  19%  resets in 1d 12h
+    Fable 7d                █████───────────────────  21%  resets in 1d 12h
 
   pedropaulovc@gmail.com · max · omp#6
     disabled: oauth refresh failed: OAuthError: anthropic token refresh failed: 400
@@ -21,19 +21,19 @@ CLAUDE
 
 CODEX
   pedro@vezza.com.br · pro · omp#1
-    weekly                  ────────────────────────   0%  EXHAUSTED · resets in 2d15h
-    GPT-5.3-Codex-Spark 5h  ████████████████████████ 100%  resets in 5h00m
-    GPT-5.3-Codex-Spark 7d  ████████████████████████ 100%  resets in 7d00h
-    credits                                          442.37 (≈$17.69)
+    weekly                  ────────────────────────   0%  resets in 2d 15h · EXHAUSTED
+    GPT-5.3-Codex-Spark 5h  ████████████████████████ 100%  resets in 5h
+    GPT-5.3-Codex-Spark 7d  ████████████████████████ 100%  resets in 7d
+    credits                                          442.19 (≈$17.69)
 
   pedropaulovc@gmail.com · pro · omp#9
-    weekly                  ────────────────────────   0%  EXHAUSTED · resets in 2d14h
-    GPT-5.3-Codex-Spark 5h  ████████████████████████ 100%  resets in 5h00m
-    GPT-5.3-Codex-Spark 7d  ████████████████████████ 100%  resets in 7d00h
-    · gpt-6-astra unavailable
+    weekly                  ────────────────────────   0%  resets in 2d 13h · EXHAUSTED
+    GPT-5.3-Codex-Spark 5h  ████████████████████████ 100%  resets in 5h
+    GPT-5.3-Codex-Spark 7d  ████████████████████████ 100%  resets in 7d
+    · gpt-6-astra unavailable for 2d 13h (credits would enable)
 ```
 
-The bar and the percentage are quota **remaining**, not used. Bars are green above 50%, yellow above 20%, red below — and colour is dropped when output is not a terminal. Column widths adapt to the terminal: the bar narrows and long meter names clip rather than wrapping.
+The bar and the percentage are quota **remaining**, not used. The countdown comes before `EXHAUSTED` so every reset time sits in the same column. Bars are green above 50%, yellow above 20%, red below — and colour is dropped when output is not a terminal. Column widths adapt to the terminal: the bar narrows and long meter names clip rather than wrapping.
 
 ## Install
 

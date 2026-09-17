@@ -10,6 +10,7 @@
  */
 
 import type { Account, AccountQuota, Credits, ProbeOptions, QuotaWindow } from "./types.ts";
+import { formatDuration } from "./render.ts";
 
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const AUTH_CLAIM = "https://api.openai.com/auth";
@@ -66,6 +67,8 @@ interface RawSpendControl {
 
 interface RawModelUsage {
 	available?: unknown;
+	available_at?: unknown;
+	credits_would_enable?: unknown;
 }
 
 interface RawTokenClaims {
@@ -203,7 +206,14 @@ export function normalizeCodexUsage(payload: unknown, now: number = Date.now()):
 	if (typeof usage.model_usage === "object" && usage.model_usage !== null) {
 		for (const [model, state] of Object.entries(usage.model_usage)) {
 			if (typeof state !== "object" || state === null) continue;
-			if ((state as RawModelUsage).available === false) notes.push(`${model} unavailable`);
+			const gate = state as RawModelUsage;
+			if (gate.available !== false) continue;
+			// `available_at` and `credits_would_enable` say whether the gate is a
+			// wait or a purchase, which is the whole reason to surface the note.
+			const at = typeof gate.available_at === "string" ? Date.parse(gate.available_at) : Number.NaN;
+			const until = Number.isFinite(at) && at > now ? ` for ${formatDuration(at - now)}` : "";
+			const buyable = gate.credits_would_enable === true ? " (credits would enable)" : "";
+			notes.push(`${model} unavailable${until}${buyable}`);
 		}
 	}
 

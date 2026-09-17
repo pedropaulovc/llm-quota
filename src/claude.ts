@@ -344,12 +344,11 @@ export async function probeClaude(account: Account, opts: ProbeOptions): Promise
 		signal: AbortSignal.timeout(opts.timeoutMs),
 	});
 	// The usage endpoint reports neither identity nor plan, so recover both at once.
-	// A store without an orgId also needs the profile call: the organization is
-	// part of the identity key that merges a credential with its twin row.
-	const identity: Promise<ClaudeIdentity> =
-		account.email === undefined || account.plan === undefined || account.orgId === undefined
-			? fetchClaudeIdentity(account.accessToken, opts)
-			: Promise.resolve({});
+	// Unconditional: a store that happens to know an email and a coarse "max" would
+	// otherwise render a different plan than its profile-probed twin ("max" vs
+	// "max 20x") purely by accident of which store it came from, and the org uuid
+	// this returns is what merges a credential with that twin.
+	const identity = fetchClaudeIdentity(account.accessToken, opts);
 
 	try {
 		const [response, who] = await Promise.all([usage, identity]);
