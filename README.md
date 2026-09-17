@@ -15,7 +15,7 @@ CLAUDE
     7d                      ████▌───────────────────  19%  resets in 1d 12h
     Fable 7d                █████───────────────────  21%  resets in 1d 12h
 
-  lovelace@example.net · max · omp#6
+  lovelace@example.net · omp#6
     disabled: oauth refresh failed: OAuthError: anthropic token refresh failed: 400
     {"error": "invalid_grant", "error_description": "Refresh token not found or invalid"}
 
@@ -33,13 +33,13 @@ CODEX
     · gpt-6-astra unavailable for 2d 13h (credits would enable)
 ```
 
-The bar and the percentage are quota **remaining**, not used. The countdown comes before `EXHAUSTED` so every reset time sits in the same column. Bars are green above 50%, yellow above 20%, red below — and colour is dropped when output is not a terminal. Column widths adapt to the terminal: the bar narrows and long meter names clip rather than wrapping.
+The bar and the percentage are quota **remaining**, not used. The countdown comes before `EXHAUSTED` so every reset time sits in the same column, and a refreshed token marks its source column with `↻`. Bars are green at 50% and above, yellow from 20% to 49%, red below 20%, and red whatever the percentage once the provider reports the window exhausted. Colour follows `FORCE_COLOR` / `NO_COLOR` / `TERM=dumb`, and is otherwise dropped when output is not a terminal. Column widths adapt to the terminal: below 92 columns the bar halves and long meter names clip rather than wrapping (provider errors and notes do wrap).
 
 ## Install
 
 ```sh
 git clone https://github.com/pedropaulovc/llm-quota && cd llm-quota
-bun install       # nothing to fetch; the CLI has zero runtime dependencies
+bun install       # type definitions only; the CLI itself has zero runtime dependencies
 bun link          # exposes `llm-quota` on PATH
 ```
 
@@ -55,9 +55,10 @@ llm-quota [--json] [--no-refresh] [--only claude|codex] [--all-sources] [--timeo
   --only <provider> restrict to "claude" or "codex"
   --all-sources     keep every store's copy of an account instead of deduping
   --timeout <sec>   per-request timeout, default 20
+  -h, --help        this message
 ```
 
-Exit code is 0 when at least one account reported, 1 when every account failed, 2 on a bad argument.
+Exit code is 0 when at least one account reported, 1 when every account failed or no account was found at all, 2 on a bad argument. `--help` exits 0.
 
 ## Credential stores
 
@@ -68,7 +69,7 @@ Accounts are discovered from all four stores, then deduped so one subscription r
 | `~/.omp/agent/agent.db` (`auth_credentials`) | Claude + Codex, several of each |
 | `~/.claude/.credentials.json` | the active Claude Code login |
 | `~/.claude/cred-profiles/*.json` | saved Claude profile snapshots |
-| `~/.codex/auth.json` | the active `codex` CLI login |
+| `~/.codex/auth.json` | the active `codex` CLI login, when it is a ChatGPT subscription (`auth_mode: "chatgpt"`) |
 
 A store that is missing is skipped; a store that is malformed reports on stderr and never hides the other accounts.
 
@@ -77,19 +78,19 @@ A store that is missing is skipped; a store that is malformed reports on stderr 
 - Claude: `GET https://api.anthropic.com/api/oauth/usage` for the windows, plus `/api/oauth/profile` issued concurrently for the account identity, organization and precise plan tier. The profile call is unconditional: it is what proves two stored credentials are the same subscription, and a store's own `subscriptionType` is coarser than the tier the profile reports (`max` vs `max 20x`).
 - Codex: `GET https://chatgpt.com/backend-api/wham/usage`, which reports the plan windows, reserve meters such as Spark, and the credit balance.
 
-`wham/usage` describes the **plan allowance** only: a spent weekly window reports exhausted even while a positive credit balance keeps funding requests as overage, which is why the credit line is shown next to the windows. ChatGPT sells overage at **25 credits per USD**, so balances render as credits with the dollar equivalent alongside.
+`wham/usage` describes the **plan allowance** only: a weekly window that is spent and that the API no longer reports as `allowed` renders exhausted even while a positive credit balance keeps funding requests as overage, which is why the credit line is shown next to the windows. ChatGPT sells overage at **25 credits per USD**, so balances render as credits with the dollar equivalent alongside.
 
 ## Token refresh
 
-Access tokens are short-lived (Anthropic ~8h), so an expired token is refreshed automatically before probing and the rotated token is written back to the store it came from.
+Access tokens are short-lived (Anthropic ~8h), so a token with under two minutes of life left is refreshed before probing and the rotated token is written back to the store it came from. A credential whose store records no usable expiry — `~/.codex/auth.json` keeps none, and its token need not carry a readable `exp` — is probed as it is; a resulting HTTP 401 triggers one re-mint through the same write-back, then one re-probe.
 
 Refresh tokens **rotate**: dropping the new one bricks the login. Write-back is therefore mandatory and careful — SQLite rows are updated inside an `IMMEDIATE` transaction that re-reads the row and yields to a concurrent writer (omp refreshing the same credential) rather than clobbering it, and JSON files are patched field-wise then atomically renamed with mode 0600, preserving unrelated keys such as `mcpOAuth`.
 
 Use `--no-refresh` to guarantee the tool only reads.
 
-An Anthropic OAuth grant family dies ~30 days after the interactive login regardless of rotation; those accounts surface as `refresh failed: invalid_grant` and need a re-login.
+An Anthropic OAuth grant family dies ~30 days after the interactive login regardless of rotation. Those accounts surface as `refresh failed: anthropic token refresh failed: HTTP 400 {"error":"invalid_grant",…}`, or as `disabled: <cause the store recorded>` when the store already marked the credential dead, and need a re-login.
 
-Tokens are never printed, logged, or included in `--json` output, and are stripped from provider error bodies.
+Tokens are never printed, logged, or included in `--json` output, and are stripped from provider error bodies — in raw, percent-encoded, form-encoded and JSON-escaped form, since a rejected refresh echoes the request. The one unredacted output is the parser's own message when a credential store cannot be read.
 
 ## License
 
