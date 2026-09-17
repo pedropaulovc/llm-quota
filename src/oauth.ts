@@ -25,9 +25,13 @@ interface TokenResponse {
 	expires_in?: unknown;
 }
 
-/** Truncated, secret-free description of a failed token exchange. */
-async function refreshFailure(provider: string, response: Response): Promise<Error> {
-	const body = await response.text().catch(() => "");
+/**
+ * Truncated, secret-free description of a failed token exchange. The sent
+ * refresh token is redacted: an OAuth error body may echo the credential it
+ * rejected, and this message reaches stdout as a `refresh failed: …` row.
+ */
+async function refreshFailure(provider: string, response: Response, sentRefreshToken: string): Promise<Error> {
+	const body = (await response.text().catch(() => "")).replaceAll(sentRefreshToken, "<token>");
 	const detail = body.length > 200 ? `${body.slice(0, 200)}…` : body;
 	return new Error(`${provider} token refresh failed: HTTP ${response.status} ${detail}`.trimEnd());
 }
@@ -38,8 +42,10 @@ function readTokens(provider: string, payload: TokenResponse, sentRefreshToken: 
 		throw new Error(`${provider} token refresh returned no access_token`);
 	}
 	const expiresIn = payload.expires_in;
-	if (typeof expiresIn !== "number") {
-		throw new Error(`${provider} token refresh returned no expires_in`);
+	// `typeof NaN === "number"`, and `{"expires_in":1e309}` parses to Infinity;
+	// either would persist as a NaN/null expiry and refresh on every later run.
+	if (typeof expiresIn !== "number" || !Number.isFinite(expiresIn)) {
+		throw new Error(`${provider} token refresh returned no usable expires_in`);
 	}
 	const rotated = payload.refresh_token;
 	return {
@@ -67,7 +73,7 @@ export async function refreshClaudeToken(refreshToken: string, opts: ProbeOption
 		}),
 		signal: AbortSignal.timeout(opts.timeoutMs),
 	});
-	if (!response.ok) throw await refreshFailure("anthropic", response);
+	if (!response.ok) throw await refreshFailure("anthropic", response, refreshToken);
 	return readTokens("anthropic", (await response.json()) as TokenResponse, refreshToken);
 }
 
@@ -87,7 +93,7 @@ export async function refreshCodexToken(refreshToken: string, opts: ProbeOptions
 		}).toString(),
 		signal: AbortSignal.timeout(opts.timeoutMs),
 	});
-	if (!response.ok) throw await refreshFailure("codex", response);
+	if (!response.ok) throw await refreshFailure("codex", response, refreshToken);
 	return readTokens("codex", (await response.json()) as TokenResponse, refreshToken);
 }
 
