@@ -83,6 +83,7 @@ interface RawProfileAccount {
 }
 
 interface RawProfileOrganization {
+	uuid?: unknown;
 	name?: unknown;
 	organization_type?: unknown;
 	rate_limit_tier?: unknown;
@@ -92,6 +93,8 @@ export interface ClaudeIdentity {
 	accountId?: string;
 	email?: string;
 	plan?: string;
+	/** Organization uuid: part of the identity key, since one email can hold two grants. */
+	orgId?: string;
 	orgName?: string;
 }
 
@@ -112,16 +115,21 @@ function oauthHeaders(accessToken: string): Record<string, string> {
 	};
 }
 
-/** Anthropic money objects hold minor units scaled by `exponent` (cents when 2). */
+/**
+ * Anthropic money objects hold minor units scaled by `exponent` (cents when 2).
+ * `undefined` for any shape that cannot yield a real amount: dropping the
+ * balance is correct, rendering a negative or NaN one as money is not.
+ */
 function moneyAmount(value: unknown): { amount: number; currency: string } | undefined {
 	if (typeof value !== "object" || value === null) return undefined;
 	const money = value as RawMoney;
-	if (typeof money.amount_minor !== "number" || !Number.isFinite(money.amount_minor)) return undefined;
-	const exponent = typeof money.exponent === "number" ? money.exponent : 2;
-	return {
-		amount: money.amount_minor / 10 ** exponent,
-		currency: typeof money.currency === "string" ? money.currency : "USD",
-	};
+	const minor = money.amount_minor;
+	if (typeof minor !== "number" || !Number.isSafeInteger(minor) || minor < 0) return undefined;
+	const exponent = money.exponent === undefined ? 2 : money.exponent;
+	if (typeof exponent !== "number" || !Number.isInteger(exponent) || exponent < 0 || exponent > 6) return undefined;
+	const amount = minor / 10 ** exponent;
+	if (!Number.isFinite(amount)) return undefined;
+	return { amount, currency: typeof money.currency === "string" ? money.currency : "USD" };
 }
 
 function windowsFromLimits(limits: readonly unknown[]): QuotaWindow[] {
@@ -205,12 +213,20 @@ function collapse(windows: readonly QuotaWindow[]): QuotaWindow[] {
 	return [...worst.values()].sort((a, b) => rank(a) - rank(b) || a.id.localeCompare(b.id));
 }
 
-function lockedReason(usage: RawUsage): string | undefined {
+/**
+ * `locked` note for the first locked bucket. `locked_reason` is free-form
+ * provider text that can echo a rejected credential, so it is only quoted when
+ * it looks like a reason code (`usage_limit_reached`); anything longer or
+ * richer degrades to the bare note rather than printing the provider's string.
+ */
+function lockedNote(usage: RawUsage): string | undefined {
 	const buckets = [usage.five_hour, usage.seven_day, usage.seven_day_opus, usage.seven_day_sonnet, usage.seven_day_oauth_apps];
 	for (const raw of buckets) {
 		if (typeof raw !== "object" || raw === null) continue;
 		const reason = (raw as RawBucket).locked_reason;
-		if (typeof reason === "string" && reason.length > 0) return reason;
+		if (typeof reason !== "string" || reason.length === 0) continue;
+		if (reason.length > 48 || !/^[a-z0-9_.:-]+$/.test(reason)) return "locked";
+		return `locked: ${reason}`;
 	}
 	return undefined;
 }
@@ -244,8 +260,8 @@ export function normalizeClaudeUsage(payload: unknown, now: number = Date.now())
 	}
 	if (capReached) notes.push("spend cap reached");
 
-	const locked = lockedReason(usage);
-	if (locked !== undefined) notes.push(`locked: ${locked}`);
+	const locked = lockedNote(usage);
+	if (locked !== undefined) notes.push(locked);
 
 	return { windows, credits, notes };
 }
@@ -306,11 +322,13 @@ export async function fetchClaudeIdentity(accessToken: string, opts: ProbeOption
 
 		const uuid = typeof profile.uuid === "string" && profile.uuid.length > 0 ? profile.uuid : nested?.uuid;
 		const address = typeof profile.email === "string" && profile.email.length > 0 ? profile.email : nested?.email;
+		const orgId = organization?.uuid;
 		const orgName = organization?.name;
 		return {
 			accountId: typeof uuid === "string" && uuid.length > 0 ? uuid : undefined,
 			email: typeof address === "string" && address.length > 0 ? address : undefined,
 			plan: displayPlan(organization, nested),
+			orgId: typeof orgId === "string" && orgId.length > 0 ? orgId : undefined,
 			orgName: typeof orgName === "string" && orgName.length > 0 ? orgName : undefined,
 		};
 	} catch {
@@ -326,8 +344,10 @@ export async function probeClaude(account: Account, opts: ProbeOptions): Promise
 		signal: AbortSignal.timeout(opts.timeoutMs),
 	});
 	// The usage endpoint reports neither identity nor plan, so recover both at once.
+	// A store without an orgId also needs the profile call: the organization is
+	// part of the identity key that merges a credential with its twin row.
 	const identity: Promise<ClaudeIdentity> =
-		account.email === undefined || account.plan === undefined
+		account.email === undefined || account.plan === undefined || account.orgId === undefined
 			? fetchClaudeIdentity(account.accessToken, opts)
 			: Promise.resolve({});
 
@@ -339,6 +359,7 @@ export async function probeClaude(account: Account, opts: ProbeOptions): Promise
 			email: account.email ?? who.email,
 			// organization.rate_limit_tier is more precise than a stored subscriptionType.
 			plan: who.plan ?? account.plan,
+			orgId: account.orgId ?? who.orgId,
 			orgName: who.orgName ?? account.orgName,
 			// The store's label already reflects any email it knew; only fill a blind one.
 			label: account.email === undefined ? who.email ?? account.label : account.label,

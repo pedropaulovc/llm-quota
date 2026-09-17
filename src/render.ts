@@ -5,6 +5,9 @@
  * one block per account, one aligned line per metered window, and a bar whose
  * fill is the quota still available. Columns are sized from the whole data set
  * so every window line in the output shares a left edge.
+ *
+ * Both views quote provider and store text, so every such string is redacted
+ * on the way out (see `redact`) and no credential can reach the output.
  */
 
 import type { AccountQuota, Credits, Provider, QuotaWindow } from "./types.ts";
@@ -79,7 +82,7 @@ function accountBlock(quota: AccountQuota, widths: Widths, columns: number, now:
 	for (const window of orderWindows(quota.windows)) lines.push(windowLine(window, widths, now, color));
 	if (quota.credits !== undefined) lines.push(creditsLine(quota.credits, widths, color));
 	for (const note of quota.notes) {
-		for (const line of wrap(`· ${note}`, columns - 4)) lines.push(`    ${paint(line, DIM, color)}`);
+		for (const line of wrap(`· ${redact(note)}`, columns - 4)) lines.push(`    ${paint(line, DIM, color)}`);
 	}
 	return lines;
 }
@@ -207,7 +210,7 @@ export function renderJson(quotas: AccountQuota[]): string {
 							limitReached: quota.credits.limitReached === true,
 						}
 					: null,
-				notes: quota.notes,
+				notes: quota.notes.map(redact),
 				error: errorOf(quota) ?? null,
 			})),
 		},
@@ -232,11 +235,35 @@ function colorFor(remaining: number, exhausted: boolean): string {
 	return GREEN;
 }
 
+const REDACTED = "<redacted>";
+
+/**
+ * Provider and store strings are printed verbatim, and some of them quote an
+ * HTTP body: omp's disabled cause embeds the token endpoint's response, which
+ * can echo the credential that was rejected. Every such string passes through
+ * here first, so no secret reaches the terminal or `--json`. Prose, emails,
+ * URLs, uuids and ISO timestamps carry no unbroken 40-character run of the
+ * base64url alphabet, so they survive intact.
+ */
+const SECRET_PATTERNS: RegExp[] = [
+	/\bsk-[A-Za-z0-9][A-Za-z0-9_-]*/g,
+	/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g,
+	/\b(?:app|rt)_[A-Za-z0-9_-]{6,}/g,
+	/\boai-[A-Za-z0-9][A-Za-z0-9_-]{5,}/g,
+	/[A-Za-z0-9_-]{40,}/g,
+];
+
+function redact(text: string): string {
+	let out = text;
+	for (const pattern of SECRET_PATTERNS) out = out.replace(pattern, REDACTED);
+	return out;
+}
+
 /** A store-disabled credential outranks any probe error text. */
 function errorOf(quota: AccountQuota): string | undefined {
 	const cause = quota.account.disabledCause;
-	if (cause !== undefined) return `disabled: ${cause.replace(/\s+/g, " ").trim()}`;
-	if (quota.error !== undefined) return quota.error.replace(/\s+/g, " ").trim();
+	if (cause !== undefined) return `disabled: ${redact(cause.replace(/\s+/g, " ").trim())}`;
+	if (quota.error !== undefined) return redact(quota.error.replace(/\s+/g, " ").trim());
 	return undefined;
 }
 

@@ -22,6 +22,12 @@ export interface Account {
 	email?: string;
 	/** Subscription tier as the store recorded it ("max", "pro", "plus"). */
 	plan?: string;
+	/**
+	 * Subscription workspace. One email can hold several (a Team seat plus a
+	 * personal Max plan), each a separate grant with its own quota, so this
+	 * participates in identity.
+	 */
+	orgId?: string;
 	orgName?: string;
 	source: SourceKind;
 	/** Short source tag for display: "omp#10", "claude-code", "codex-cli". */

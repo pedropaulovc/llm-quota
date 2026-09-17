@@ -23,11 +23,13 @@ CODEX
   pedro@vezza.com.br · pro · omp#1
     weekly                  ────────────────────────   0%  EXHAUSTED · resets in 2d15h
     GPT-5.3-Codex-Spark 5h  ████████████████████████ 100%  resets in 5h00m
+    GPT-5.3-Codex-Spark 7d  ████████████████████████ 100%  resets in 7d00h
     credits                                          442.37 (≈$17.69)
 
   pedropaulovc@gmail.com · pro · omp#9
     weekly                  ────────────────────────   0%  EXHAUSTED · resets in 2d14h
     GPT-5.3-Codex-Spark 5h  ████████████████████████ 100%  resets in 5h00m
+    GPT-5.3-Codex-Spark 7d  ████████████████████████ 100%  resets in 7d00h
     · gpt-6-astra unavailable
 ```
 

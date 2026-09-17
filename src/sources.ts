@@ -32,6 +32,7 @@ interface OmpData {
 	expires?: unknown;
 	accountId?: unknown;
 	email?: unknown;
+	orgId?: unknown;
 	orgName?: unknown;
 }
 
@@ -47,6 +48,7 @@ interface ClaudeStore {
 	account?: {
 		accountUuid?: unknown;
 		emailAddress?: unknown;
+		organizationUuid?: unknown;
 		organizationName?: unknown;
 	};
 	email?: unknown;
@@ -73,15 +75,22 @@ function num(value: unknown): number | undefined {
 
 /**
  * Stable grouping key. Two accounts are provably the same only when they share
- * a provider and an account id, or a provider and an email. A candidate with
- * neither is keyed by its source so it can never absorb — or be absorbed by —
- * a different account.
+ * a provider and an account id, or a provider and an email — and, when both
+ * stores know it, the same organization: one email can hold a Team seat and a
+ * personal Max plan, two separate grants with separate quotas. An orgId that
+ * merely repeats the account id (omp records the ChatGPT account id in both
+ * fields, Codex having no organization) carries no identity and is ignored, so
+ * a store that reports no organization still matches its twin. A candidate
+ * with no id at all is keyed by its source so it can never absorb — or be
+ * absorbed by — a different account.
  */
 export function identityKey(account: Account): string {
 	const accountId = account.accountId;
-	if (accountId !== undefined) return `${account.provider}|acct:${accountId}`;
+	const orgId = account.orgId;
+	const org = orgId === undefined || orgId === accountId ? "" : `|org:${orgId}`;
+	if (accountId !== undefined) return `${account.provider}|acct:${accountId}${org}`;
 	const email = account.email;
-	if (email !== undefined) return `${account.provider}|email:${email.toLowerCase()}`;
+	if (email !== undefined) return `${account.provider}|email:${email.toLowerCase()}${org}`;
 	return `${account.provider}|src:${account.sourceTag}`;
 }
 
@@ -120,6 +129,7 @@ function ompAccount(dbPath: string, row: OmpRow): Account | undefined {
 		email,
 		// omp stores the Codex plan in orgName; for Anthropic it is a real org name.
 		plan: provider === "codex" ? str(data.orgName) : undefined,
+		orgId: str(data.orgId),
 		orgName: provider === "claude" ? str(data.orgName) : undefined,
 		source: { kind: "omp", dbPath, rowId: row.id },
 		sourceTag,
@@ -143,6 +153,7 @@ function claudeFileAccount(source: SourceKind, filePath: string, sourceTag: stri
 		accountId: str(store.account?.accountUuid),
 		email,
 		plan: str(oauth.subscriptionType),
+		orgId: str(store.account?.organizationUuid),
 		orgName: str(store.account?.organizationName),
 		source,
 		sourceTag,
@@ -277,6 +288,7 @@ function collapseGroup(group: Account[]): Account {
 	for (const twin of group) {
 		merged.email ??= twin.email;
 		merged.plan ??= twin.plan;
+		merged.orgId ??= twin.orgId;
 		merged.orgName ??= twin.orgName;
 	}
 	merged.label = merged.email ?? merged.label;

@@ -35,6 +35,7 @@ interface RawWhamUsage {
 }
 
 interface RawRateLimit {
+	allowed?: unknown;
 	limit_reached?: unknown;
 	primary_window?: unknown;
 	secondary_window?: unknown;
@@ -82,18 +83,24 @@ interface NormalizedUsage {
 	plan?: string;
 }
 
-/** Window duration in seconds → stable id fragment: 18000 → "5h", 604800 → "weekly". */
+/**
+ * Window duration in seconds → stable id fragment: 18000 → "5h", 604800 → "weekly".
+ * Real spans drift a little (604740 is still a weekly window), so classify by
+ * rounded span rather than by exact constants.
+ */
 function windowSpan(seconds: unknown): string | undefined {
 	if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds <= 0) return undefined;
-	if (seconds === 18000) return "5h";
-	if (seconds === 604800) return "weekly";
-	return `${Math.round(seconds / 3600)}h`;
+	if (Math.abs(seconds - 604800) <= 6048) return "weekly";
+	if (Math.abs(seconds - 18000) <= 180) return "5h";
+	if (seconds >= 86400) return `${Math.round(seconds / 86400)}d`;
+	if (seconds >= 3600) return `${Math.round(seconds / 3600)}h`;
+	return `${Math.max(1, Math.round(seconds / 60))}m`;
 }
 
 function readWindow(
 	raw: unknown,
 	now: number,
-	meter: { idPrefix?: string; labelPrefix?: string; primary: boolean; limitReached: boolean },
+	meter: { idPrefix?: string; labelPrefix?: string; primary: boolean; allowed: boolean },
 ): QuotaWindow | undefined {
 	if (typeof raw !== "object" || raw === null) return undefined;
 	const window = raw as RawWindow;
@@ -115,7 +122,9 @@ function readWindow(
 		label: meter.labelPrefix === undefined ? span : `${meter.labelPrefix} ${duration}`,
 		usedPercent: window.used_percent,
 		resetsAt: resetAt ?? resetAfter,
-		exhausted: meter.limitReached || window.used_percent >= 100,
+		// A group-level `limit_reached` says nothing about a sibling window that still
+		// has room, so exhaustion is this window's own overrun plus a blocked group.
+		exhausted: window.used_percent >= 100 && !meter.allowed,
 		primary: meter.primary,
 	};
 }
@@ -129,13 +138,18 @@ export function normalizeCodexUsage(payload: unknown, now: number = Date.now()):
 	const usage = payload as RawWhamUsage;
 
 	const windows: QuotaWindow[] = [];
+	const notes: string[] = [];
 	if (typeof usage.rate_limit === "object" && usage.rate_limit !== null) {
 		const plan = usage.rate_limit as RawRateLimit;
-		const limitReached = plan.limit_reached === true;
-		const primary = readWindow(plan.primary_window, now, { primary: true, limitReached });
+		const meter = { primary: true, allowed: plan.allowed === true };
+		const primary = readWindow(plan.primary_window, now, meter);
 		if (primary !== undefined) windows.push(primary);
-		const secondary = readWindow(plan.secondary_window, now, { primary: true, limitReached });
+		const secondary = readWindow(plan.secondary_window, now, meter);
 		if (secondary !== undefined) windows.push(secondary);
+		// A blocked group whose windows all still have room is real information no
+		// window row can carry, so surface it as a note instead of dropping it.
+		const capped = (primary?.usedPercent ?? 0) >= 100 || (secondary?.usedPercent ?? 0) >= 100;
+		if (plan.limit_reached === true && !capped) notes.push("plan limit reached");
 	}
 
 	const additional = Array.isArray(usage.additional_rate_limits) ? usage.additional_rate_limits : [];
@@ -154,16 +168,17 @@ export function normalizeCodexUsage(payload: unknown, now: number = Date.now()):
 				.replace(/^-+|-+$/g, ""),
 			labelPrefix: name,
 			primary: false,
-			limitReached: limit.limit_reached === true,
+			allowed: limit.allowed === true,
 		};
 		const main = readWindow(limit.primary_window, now, meter);
 		if (main !== undefined) windows.push(main);
 		const trailing = readWindow(limit.secondary_window, now, meter);
-		if (trailing !== undefined && trailing.usedPercent > 0) windows.push(trailing);
+		if (trailing !== undefined) windows.push(trailing);
+		const capped = (main?.usedPercent ?? 0) >= 100 || (trailing?.usedPercent ?? 0) >= 100;
+		if (limit.limit_reached === true && !capped) notes.push(`${name} limit reached`);
 	}
 	if (windows.length === 0) throw new Error("unexpected usage payload");
 
-	const notes: string[] = [];
 	let credits: Credits | undefined;
 	if (typeof usage.credits === "object" && usage.credits !== null) {
 		const wallet = usage.credits as RawCredits;

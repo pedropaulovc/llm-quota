@@ -16,6 +16,32 @@ describe("refresh", () => {
 		expect((error as Error).message).toInclude("<token>");
 	});
 
+	test("redacts the encoded serializations of the sent token a form echo returns", async () => {
+		// The codex refresh POSTs `application/x-www-form-urlencoded`, so an error
+		// that quotes the submitted credential returns it percent- or form-encoded,
+		// and a JSON echo returns it backslash-escaped.
+		const secret = 'rt+slash/eq=sp ace"quote';
+		const encoded = encodeURIComponent(secret);
+		const echoes = [encoded, encoded.replaceAll("%20", "+"), JSON.stringify(secret).slice(1, -1)];
+		for (const echo of echoes) {
+			const error = await refreshCodexToken(secret, opts(`{"error":"invalid_grant","sent":"${echo}"}`, 400)).catch(
+				(reason: Error) => reason,
+			);
+			expect((error as Error).message).not.toInclude(echo);
+			expect((error as Error).message).not.toInclude(secret);
+			expect((error as Error).message).toInclude("<token>");
+		}
+	});
+
+	test("rejects an expires_in that parks the expiry beyond any refresh", async () => {
+		// A seconds/ms mixup or a bogus huge value makes the credential look valid
+		// for millennia: it is never refreshed and every probe 401s forever.
+		const millennia = refreshCodexToken(SECRET, opts(`{"access_token":"a","expires_in":253402300799}`, 200));
+		await expect(millennia).rejects.toThrow("implausible expires_in");
+		const longPast = refreshClaudeToken(SECRET, opts(`{"access_token":"a","expires_in":-999999}`, 200));
+		await expect(longPast).rejects.toThrow("implausible expires_in");
+	});
+
 	test("rejects an expiry that would persist as NaN or null", async () => {
 		// `typeof NaN === "number"`, and 1e309 parses to Infinity.
 		const infinite = refreshCodexToken(SECRET, opts(`{"access_token":"a","expires_in":1e309}`, 200));
@@ -42,5 +68,12 @@ describe("decodeJwtExpiryMs", () => {
 	test("returns undefined for a non-JWT instead of throwing", () => {
 		expect(decodeJwtExpiryMs("notajwt")).toBeUndefined();
 		expect(decodeJwtExpiryMs("a.!!!not-base64!!!.c")).toBeUndefined();
+	});
+
+	test("returns undefined for an exp outside any plausible epoch-ms range", () => {
+		// `exp` in ms instead of seconds, or a junk value: a token that looks valid
+		// for millennia would never be refreshed.
+		const far = Buffer.from(JSON.stringify({ exp: 9_999_999_999_999 })).toString("base64url");
+		expect(decodeJwtExpiryMs(`header.${far}.sig`)).toBeUndefined();
 	});
 });
